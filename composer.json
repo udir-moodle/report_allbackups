@@ -1,0 +1,17 @@
+{
+  "name": "udir-moodle/report_allbackups",
+  "description": "All backups — Composer/Packagist mirror of the Moodle plugin report_allbackups, auto-updated from the Moodle plugins directory.",
+  "type": "moodle-report",
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://moodle.org/plugins/report_allbackups",
+  "require": {
+    "composer/installers": "~1.0 || ~2.0",
+    "moodle/moodle": "4.0.* || 4.1.*"
+  },
+  "extra": {
+    "installer-name": "allbackups",
+    "moodle-composer": {
+      "component": "report_allbackups"
+    }
+  }
+}
