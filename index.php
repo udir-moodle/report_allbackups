@@ -21,18 +21,20 @@
  * @copyright  2020 Catalyst IT
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-use ZipStream\Option\Archive;
 use ZipStream\ZipStream;
 
 require_once('../../config.php');
 require_once($CFG->libdir . '/adminlib.php');
 
+// Get all the required parameters.
 $delete = optional_param('delete', '', PARAM_TEXT);
 $filename = optional_param('filename', '', PARAM_TEXT);
 $deleteselected = optional_param('deleteselectedfiles', '', PARAM_TEXT);
 $downloadselected = optional_param('downloadallselectedfiles', '', PARAM_TEXT);
 $fileids = optional_param('fileids', '', PARAM_TEXT);
 $currenttab = optional_param('tab', 'core', PARAM_TEXT);
+// Records per page, defaults to 20, 0 means show all.
+$perpage = optional_param('perpage', 20, PARAM_INT);
 
 admin_externalpage_setup('reportallbackups', '', array('tab' => $currenttab), '', array('pagelayout' => 'report'));
 
@@ -131,10 +133,14 @@ if (!empty($downloadselected) && confirm_sesskey()) {
         // Raise memory limit - each file is loaded in PHP memory, so this much be larger than the largest backup file.
         raise_memory_limit(MEMORY_HUGE);
 
-        // Initialize zip for saving multiple selected files at once.
-        $options = new Archive();
-        $options->setSendHttpHeaders(true);
-        $zip = new ZipStream('all_backups.zip', $options);
+        // Initialize zip for saving multiple selected files at once with ANSSI format filename.
+        // Format: YYYY-MM-DD_HHMMSS_all-backups.zip for enhanced traceability.
+        $timestamp = date('Y-m-d_His');
+        $zipname = clean_filename($timestamp . '-all_backups.zip');
+        $zip = new ZipStream(
+            outputName: $zipname,
+            sendHttpHeaders: true,
+        );
 
         // Get list of ids from the checked checkboxes.
         $post = data_submitted();
@@ -192,11 +198,14 @@ if (!empty($downloadselected) && confirm_sesskey()) {
     }
 }
 
+// Setup filter arrays for different tabs.
 if ($currenttab == 'autobackup') {
     $filters = array('filename' => 0, 'timecreated' => 0);
 } else {
-    $filters = array('filename' => 0, 'realname' => 0, 'coursecategory' => 0, 'filearea' => 0, 'timecreated' => 0);
+    $filters = ['filename' => 0, 'realname' => 0, 'suspended' => 0, 'coursecategory' => 0, 'filearea' => 0, 'timecreated' => 0];
 }
+
+// Initialize appropriate table based on current tab.
 if ($currenttab == 'autobackup') {
     $table = new \report_allbackups\output\autobackups_table('autobackups');
 } else {
@@ -210,6 +219,7 @@ if (!$table->is_downloading()) {
     // Print the page header.
     $PAGE->set_title(get_string('pluginname', 'report_allbackups'));
     echo $OUTPUT->header();
+
     if (!empty(get_config('backup', 'backup_auto_destination'))) {
         $row = $tabs = array();
         $row[] = new tabobject('core',
@@ -229,6 +239,17 @@ if (!$table->is_downloading()) {
     $ufiltering->display_add();
     $ufiltering->display_active();
 
+    // Setup records per page selector and its options.
+    $perpageoptions = [
+        10 => 10,
+        20 => 20,
+        50 => 50,
+        100 => 100,
+        200 => 200,
+        500 => 500,
+        0 => get_string('all')
+    ];
+
     echo '<form action="index.php" method="post" id="allbackupsform">';
     echo html_writer::start_div();
     echo html_writer::tag('input', '', array('type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()));
@@ -239,10 +260,16 @@ if (!$table->is_downloading()) {
     $event = \report_allbackups\event\report_downloaded::create();
     $event->trigger();
 }
+
+// Adjust pagination for table display.
+$perpageval = ($perpage == 0) ? 999999 : $perpage;
+
 if ($currenttab == 'autobackup') {
     // Get list of files from backup.
+    $table->pagesize($perpageval, 999999);
     $table->adddata($ufiltering);
 } else {
+    // Setup SQL query for standard backups.
     list($extrasql, $params) = $ufiltering->get_sql_filter();
     $fields = 'f.id, f.contextid, f.component, f.filearea, f.filename, f.userid, f.filesize, f.timecreated, f.filepath, f.itemid';
     $fields .= \core_user\fields::for_name()->get_sql('u')->selects;
@@ -253,17 +280,27 @@ if ($currenttab == 'autobackup') {
         $from .= ' JOIN {context} cx ON cx.id = f.contextid AND cx.contextlevel = '.CONTEXT_COURSE .
                  ' JOIN {course} c ON c.id = cx.instanceid';
     }
-    $where = "f.filename like '%.mbz' and f.component <> 'tool_recyclebin' and f.filearea <> 'draft'";
+    $config = get_config('report_allbackups');
+    $components = !empty($config->components) ? $config->components : 'backup,user';
+    $fileareas = !empty($config->fileareas) ? $config->fileareas : 'activity,automated,backup,course,private';
+    $componentslist = explode(',', $components);
+    $fileareaslist = explode(',', $fileareas);
+    [$insqlcomp, $inparamscomp] = $DB->get_in_or_equal($componentslist, SQL_PARAMS_NAMED, 'comp_');
+    [$insqlarea, $inparamsarea] = $DB->get_in_or_equal($fileareaslist, SQL_PARAMS_NAMED, 'filearea_');
+
+    $where = "f.mimetype = 'application/vnd.moodle.backup' AND f.component $insqlcomp AND f.filearea $insqlarea";
     if (!empty($extrasql)) {
         $where .= " and ".$extrasql;
     }
 
+    $params = array_merge($params, $inparamscomp, $inparamsarea);
+
     $table->set_sql($fields, $from, $where, $params);
-    $table->out(40, true);
+    $table->out($perpageval, true);
 }
 
 if (!$table->is_downloading()) {
-
+    // Display delete and download buttons.
     echo html_writer::tag('input', "", array('name' => 'deleteselectedfiles', 'type' => 'submit',
         'id' => 'deleteallselected', 'class' => 'btn btn-secondary',
         'value' => get_string('deleteselectedfiles', 'report_allbackups')));
@@ -273,7 +310,16 @@ if (!$table->is_downloading()) {
 
     echo html_writer::end_div();
     echo html_writer::end_tag('form');
+
+    $perpageselect = new single_select($PAGE->url, 'perpage', $perpageoptions, $perpage, null);
+    $perpageselect->set_label(get_string('listperpage', 'report_allbackups'));
+
+    // Display records per page selector.
+    echo html_writer::div($OUTPUT->render($perpageselect), 'perpagecombobox');
+
+    // Trigger the report viewed event.
     $event = \report_allbackups\event\report_viewed::create();
     $event->trigger();
+
     echo $OUTPUT->footer();
 }
